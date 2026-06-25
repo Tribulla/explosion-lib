@@ -1,0 +1,138 @@
+package com.example.explosionlib.engine;
+
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.core.particles.ParticleTypes;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.material.FluidState;
+
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+
+public final class ExplosionScheduler {
+    private ExplosionScheduler() {}
+
+    private static final int WRITE_FLAGS =
+        Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE | Block.UPDATE_SUPPRESS_DROPS;
+
+    public record Edit(int x, int y, int z, BlockState state) {}
+
+    private static final List<Active> ACTIVE = new ArrayList<>();
+
+    private static final class Active {
+        final ServerLevel level;
+        final double cx, cy, cz;
+        final List<List<Edit>> rings;   // edits grouped by floor(distance from center)
+        final List<long[]> forced;      // chunks to release when finished
+        final List<BlockPos> removed;   // positions cleared to air (seed the support cleanup)
+        int next = 0;
+
+        Active(ServerLevel level, double cx, double cy, double cz,
+               List<List<Edit>> rings, List<long[]> forced, List<BlockPos> removed) {
+            this.level = level; this.cx = cx; this.cy = cy; this.cz = cz;
+            this.rings = rings; this.forced = forced; this.removed = removed;
+        }
+    }
+
+    public static void schedule(ServerLevel level, BlockPos center, List<Edit> edits, List<long[]> forced) {
+        double cx = center.getX() + 0.5, cy = center.getY() + 0.5, cz = center.getZ() + 0.5;
+        if (edits.isEmpty()) {
+            ChunkForce.release(level, forced);
+            return;
+        }
+        int maxRing = 0;
+        for (Edit e : edits) {
+            int d = ringOf(e, cx, cy, cz);
+            if (d > maxRing) maxRing = d;
+        }
+        List<List<Edit>> rings = new ArrayList<>(maxRing + 1);
+        for (int i = 0; i <= maxRing; i++) rings.add(new ArrayList<>());
+        List<BlockPos> removed = new ArrayList<>();
+        for (Edit e : edits) {
+            rings.get(ringOf(e, cx, cy, cz)).add(e);
+            if (e.state().isAir()) removed.add(new BlockPos(e.x, e.y, e.z));
+        }
+
+        ACTIVE.add(new Active(level, cx, cy, cz, rings, forced, removed));
+    }
+
+    public static void tick(ServerLevel level) {
+        if (ACTIVE.isEmpty()) return;
+        Iterator<Active> it = ACTIVE.iterator();
+        while (it.hasNext()) {
+            Active a = it.next();
+            if (a.level != level) continue;
+            int end = Math.min(a.next + ExplosionConfig.EXPANSION_SPEED, a.rings.size());
+            BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos();
+            for (int ri = a.next; ri < end; ri++) {
+                for (Edit e : a.rings.get(ri)) {
+                    p.set(e.x, e.y, e.z);
+                    level.setBlock(p, e.state, WRITE_FLAGS);
+                }
+            }
+            spawnFront(a, end - 1);
+            a.next = end;
+            if (a.next >= a.rings.size()) {
+                finishCleanup(level, a.removed);
+                ChunkForce.release(level, a.forced);
+                it.remove();
+            }
+        }
+    }
+
+    private static void finishCleanup(ServerLevel level, List<BlockPos> removed) {
+        ArrayDeque<BlockPos> queue = new ArrayDeque<>(removed);
+        HashSet<Long> removedDone = new HashSet<>();
+        HashSet<Long> fluidDone = new HashSet<>();
+        BlockPos.MutableBlockPos np = new BlockPos.MutableBlockPos();
+        int budget = 400_000;
+        while (!queue.isEmpty() && budget-- > 0) {
+            BlockPos p = queue.poll();
+            for (Direction d : Direction.values()) {
+                np.setWithOffset(p, d);
+                BlockState s = level.getBlockState(np);
+                if (s.isAir()) continue;
+
+                FluidState fs = s.getFluidState();
+                if (!fs.isEmpty() && fluidDone.add(np.asLong())) {
+                    level.scheduleTick(np.immutable(), fs.getType(), fs.getType().getTickDelay(level));
+                }
+
+                if (!s.canSurvive(level, np) && removedDone.add(np.asLong())) {
+                    BlockPos rp = np.immutable();
+                    level.setBlock(rp, Blocks.AIR.defaultBlockState(), WRITE_FLAGS);
+                    queue.add(rp);   // its removal may unsupport / un-dam further blocks
+                }
+            }
+        }
+    }
+
+    private static void spawnFront(Active a, int radius) {
+        if (radius < 1) return;
+        var rng = a.level.getRandom();
+        int puffs = Math.min(6 + radius / 2, 24);
+        for (int k = 0; k < puffs; k++) {
+            double theta = rng.nextDouble() * Math.PI * 2.0;
+            double phi = Math.acos(2.0 * rng.nextDouble() - 1.0);
+            double s = Math.sin(phi);
+            double px = a.cx + radius * s * Math.cos(theta);
+            double py = a.cy + radius * Math.cos(phi);
+            double pz = a.cz + radius * s * Math.sin(theta);
+            a.level.sendParticles(ParticleTypes.EXPLOSION, px, py, pz, 1, 0.0, 0.0, 0.0, 0.0);
+            if ((k & 1) == 0) {
+                a.level.sendParticles(ParticleTypes.LARGE_SMOKE, px, py, pz, 1, 0.0, 0.02, 0.0, 0.01);
+            }
+        }
+    }
+
+    private static int ringOf(Edit e, double cx, double cy, double cz) {
+        double dx = e.x + 0.5 - cx, dy = e.y + 0.5 - cy, dz = e.z + 0.5 - cz;
+        return (int) Math.floor(Math.sqrt(dx * dx + dy * dy + dz * dz));
+    }
+}
