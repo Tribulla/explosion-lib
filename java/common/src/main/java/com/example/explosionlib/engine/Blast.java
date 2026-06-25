@@ -27,9 +27,6 @@ public final class Blast {
     public static final class Result {
         public double r0;
         public double openness;
-        public final List<int[]> debrisStruct = new ArrayList<>(); // local (x,y,z) of destroyed struct
-        public final List<int[]> rim = new ArrayList<>();          // local (x,y) columns
-        public final List<int[]> ejecta = new ArrayList<>();       // local (x,y) columns
     }
 
     static double overpressure(double z) {
@@ -115,30 +112,11 @@ public final class Blast {
                     }
                 }
 
-        for (int x = x0; x < x1; x++)
-            for (int y = y0; y < y1; y++) {
-                double offx = x - cx, offy = y - cy;
-                double dxy = Math.sqrt(offx * offx + offy * offy);
-                double h2 = Noise.hash01(r.ox + x, r.oy + y, 0, cfg.seed);
-                if (dxy >= r0 * 0.85 && dxy < r0 * RIM_FRAC && h2 < RIM_PROB * openness) {
-                    out.rim.add(new int[]{x, y});
-                } else if (dxy >= r0 * RIM_FRAC && dxy < r0 * EJECTA_OUTER) {
-                    double t2 = clamp(Math.pow(r0 / Math.max(dxy, 1e-9), 3), 0.0, 1.0);
-                    if (h2 < t2 * EJECTA_DENSITY * openness) out.ejecta.add(new int[]{x, y});
-                }
-            }
-
-        for (int i = 0; i < destroy.length; i++) {
-            if (destroy[i] && Material.isStruct(r.id[i]) && r.id[i] != Material.UNBREAKABLE) {
-                int z = i % r.nz, y = (i / r.nz) % r.ny, x = i / (r.nz * r.ny);
-                out.debrisStruct.add(new int[]{x, y, z});
-            }
-        }
         for (int i = 0; i < destroy.length; i++) {
             if (destroy[i] && r.id[i] != Material.UNBREAKABLE) { r.id[i] = Material.AIR; r.state[i] = Palette.AIR; }
         }
 
-        if (cfg.shockwave) applyShockwave(r, noise, cx, cy, cz, r0, openness, cfg.seed);
+        if (cfg.shockwave) applyShockwave(r, noise, cx, cy, cz, r0, openness, cfg.seed, cfg.debris);
 
         if (cfg.scorch) applyScorch(r, cx, cy, cz, r0, cfg.seed);
 
@@ -146,7 +124,8 @@ public final class Blast {
     }
 
     private static void applyShockwave(VoxelRegion r, Noise.ValueNoise3D noise,
-                                       int cx, int cy, int cz, double r0, double openness, long seed) {
+                                       int cx, int cy, int cz, double r0, double openness, long seed,
+                                       boolean leaveRubble) {
         double rs = r0 * SHOCKWAVE_RADIUS;
         double span = Math.max(rs - r0, 1e-6);
         int half = (int) Math.ceil(rs) + 1;
@@ -169,7 +148,7 @@ public final class Blast {
                         if (h < clamp(intensity * openness * SHOCKWAVE_SHATTER_RATE, 0.0, 1.0)) {
                             r.id[i] = Material.AIR; r.state[i] = Palette.AIR;
                         }
-                    } else if (Material.isStruct(role)) {   // rigid blocks crack; loose/fluid are left alone
+                    } else if (leaveRubble && Material.isStruct(role)) {   // rigid blocks crack in place to rubble
                         double fragility = clamp(SHOCKWAVE_TOUGHNESS_REF / Math.max(r.resist[i], 1e-6), 0.0, 1.0);
                         if (fragility < 0.05) fragility = 0.0;
                         if (h < clamp(intensity * fragility * openness * SHOCKWAVE_CRACK_RATE, 0.0, 1.0)) {

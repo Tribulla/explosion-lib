@@ -18,7 +18,43 @@ public final class Collapse {
         boolean anchored;
     }
 
-    public static void structuralCollapse(VoxelRegion r, int maxIters) {
+    public static boolean[] computeFrozen(VoxelRegion r) {
+        final int nx = r.nx, ny = r.ny, nz = r.nz, n = r.id.length;
+        boolean[] anchored = new boolean[n];
+        int[] stack = new int[n];
+        int top = 0;
+        for (int x = 0; x < nx; x++)
+            for (int y = 0; y < ny; y++)
+                for (int z = 0; z < nz; z++) {
+                    int i = (x * ny + y) * nz + z;
+                    if (!Material.isSolid(r.id[i]) || Material.isFluid(r.id[i])) continue;
+                    if (x == 0 || x == nx - 1 || y == 0 || y == ny - 1 || z == 0 || z == nz - 1
+                            || r.id[i] == Material.UNBREAKABLE) {
+                        anchored[i] = true;
+                        stack[top++] = i;
+                    }
+                }
+        while (top > 0) {
+            int cur = stack[--top];
+            int z = cur % nz, y = (cur / nz) % ny, x = cur / (nz * ny);
+            for (int[] d : N6) {
+                int ax = x + d[0], ay = y + d[1], az = z + d[2];
+                if (ax < 0 || ay < 0 || az < 0 || ax >= nx || ay >= ny || az >= nz) continue;
+                int ni = (ax * ny + ay) * nz + az;
+                if (!anchored[ni] && Material.isSolid(r.id[ni]) && !Material.isFluid(r.id[ni])) {
+                    anchored[ni] = true;
+                    stack[top++] = ni;
+                }
+            }
+        }
+        boolean[] frozen = new boolean[n];
+        for (int i = 0; i < n; i++) {
+            frozen[i] = Material.isSolid(r.id[i]) && !Material.isFluid(r.id[i]) && !anchored[i];
+        }
+        return frozen;
+    }
+
+    public static void structuralCollapse(VoxelRegion r, int maxIters, boolean[] frozen) {
         final int nx = r.nx, ny = r.ny, nz = r.nz, n = r.id.length;
         int[] label = new int[n];
         int[] stack = new int[n];
@@ -39,7 +75,10 @@ public final class Collapse {
                     members[count++] = cur;
                     int z = cur % nz, y = (cur / nz) % ny, x = cur / (nz * ny);
                     if (z < minZ) minZ = z;
-                    if (z == 0 || r.id[cur] == Material.UNBREAKABLE) anchored = true;
+                    if (z == 0 || z == nz - 1 || x == 0 || x == nx - 1 || y == 0 || y == ny - 1
+                            || r.id[cur] == Material.UNBREAKABLE || (frozen != null && frozen[cur])) {
+                        anchored = true;
+                    }
                     for (int[] d : N6) {
                         int ax = x + d[0], ay = y + d[1], az = z + d[2];
                         if (ax < 0 || ay < 0 || az < 0 || ax >= nx || ay >= ny || az >= nz) continue;

@@ -5,7 +5,7 @@ public final class ExplosionConfig {
     public long seed = 0L;           // same seed + same spot -> identical result
     public boolean shockwave = true;
     public boolean gravity = true;   // structural collapse + granular settle
-    public boolean debris = true;    // ballistic debris + rim/ejecta deposits
+    public boolean debris = true;    // leave cracked rubble (gravel) where the shockwave breaks structural blocks
     public boolean scorch = true;
     public boolean entityDamage = true;  // hurt + fling nearby entities
 
@@ -20,7 +20,10 @@ public final class ExplosionConfig {
     public static final int MAX_REGION_HALF = 80;        // hard cap on captured half-extent (bounds memory/CPU)
     public static final double UNBREAKABLE_RESIST = 50_000.0; // >= this -> treated as bedrock-tier
     public static final float FLUID_RESIST = 0.5f;       // water/lava: low so blasts clear them
-    public static final int EXPANSION_SPEED = 3;         // rings (blocks) of destruction applied per server tick
+    public static final int EXPANSION_SPEED = 3;         // rings (blocks) of destruction applied per server tick, per blast
+    public static final int MAX_APPLY_BLOCKS_PER_TICK = 40_000;   // block writes/tick across all active blasts
+    public static final int MAX_CLEANUP_OPS_PER_TICK = 20_000;    // support/fluid cleanup steps/tick across all blasts
+    public static final int CLEANUP_MAX_OPS = 400_000;            // hard cap on total cleanup steps for one blast
 
     public static final double K_CRATER = 4.0;
     public static final double POWER_DIVISOR = 1.3;
@@ -34,7 +37,6 @@ public final class ExplosionConfig {
     public static final double CRATER_ANISOTROPY = 0.15, CRATER_NOISE_FREQ = 3.0;
     public static final double CRATER_VERTICAL = 0.6;
     public static final double CORE_FRAC = 0.6, RIM_FRAC = 1.15, EJECTA_OUTER = 1.8;
-    public static final double RIM_PROB = 0.6, EJECTA_DENSITY = 0.3;
     public static final double CRATER_PROOF_RESIST = 60.0;
     public static final int DESPECKLE_ITERS = 2;
     public static final double SCORCH_PROB = 0.6;
@@ -45,15 +47,10 @@ public final class ExplosionConfig {
 
     public static final double SHOCKWAVE_RADIUS = 3.5;
     public static final double SHOCKWAVE_TOUGHNESS_REF = 6.0;
-    public static final double SHOCKWAVE_CRACK_RATE = 0.7;
+    public static final double SHOCKWAVE_CRACK_RATE = 0.2;
     public static final double SHOCKWAVE_SHATTER_RATE = 1.5;
 
     public static final int COLLAPSE_ITERS = 4;
     public static final int REPOSE_SWEEPS = 200;
     public static final int REPOSE_DEFAULT = 1;
-    public static final double DEBRIS_FRACTION = 0.25;
-    public static final int DEBRIS_MAX_PARTICLES = 300;
-    public static final double UP_BIAS = 0.6, DEBRIS_SPEED = 18.0, DEBRIS_GRAVITY = 24.0, DEBRIS_DT = 0.08;
-    public static final double DEBRIS_SCATTER = 0.15;
-    public static final int DEBRIS_MAX_STEPS = 400;
 }

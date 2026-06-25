@@ -134,23 +134,10 @@ def detonate(mat, center, yield_tnt, seed):
     for (lx, ly, lz) in np.argwhere(crater_mask):
         destroy.add((lx + bx0, ly + by0, lz + bz0))
 
-    GX2, GY2 = np.meshgrid(bxs, bys, indexing="ij")
-    dxy = np.hypot(GX2 + 0.5 - center_f[0], GY2 + 0.5 - center_f[1])
-    h2 = hash01(GX2, GY2, np.zeros_like(GX2), seed)
-    rim2d = (dxy >= R0 * 0.85) & (dxy < R0 * config.RIM_FRAC) & (h2 < config.RIM_PROB * openness)  # [RND-6]
-    t2 = np.clip((R0 / np.maximum(dxy, 1e-9)) ** 3, 0.0, 1.0)
-    ejecta2d = (dxy >= R0 * config.RIM_FRAC) & (dxy < R0 * config.EJECTA_OUTER) & \
-               (h2 < t2 * config.EJECTA_DENSITY * openness)                               # [RND-7]
-    rim_targets = list(zip(GX2[rim2d].tolist(), GY2[rim2d].tolist()))
-    ejecta_targets = list(zip(GX2[ejecta2d].tolist(), GY2[ejecta2d].tolist()))
-
+    rim_targets = []
+    ejecta_targets = []
     destroyed_struct_coords = []
-    for (x, y, z) in destroy:
-        b = mat[x, y, z]
-        if b == BEDROCK:
-            continue
-        if IS_STRUCT[b]:
-            destroyed_struct_coords.append(((x, y, z), int(b)))
+
     for (x, y, z) in destroy:
         if mat[x, y, z] != BEDROCK:
             mat[x, y, z] = AIR

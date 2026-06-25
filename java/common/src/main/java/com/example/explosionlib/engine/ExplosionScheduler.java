@@ -24,19 +24,36 @@ public final class ExplosionScheduler {
     public record Edit(int x, int y, int z, BlockState state) {}
 
     private static final List<Active> ACTIVE = new ArrayList<>();
+    private static final List<Cleanup> CLEANUPS = new ArrayList<>();
 
     private static final class Active {
         final ServerLevel level;
         final double cx, cy, cz;
         final List<List<Edit>> rings;   // edits grouped by floor(distance from center)
-        final List<long[]> forced;      // chunks to release when finished
+        final List<long[]> forced;      // chunks to release once cleanup finishes
         final List<BlockPos> removed;   // positions cleared to air (seed the support cleanup)
-        int next = 0;
+        int next = 0;                   // next ring to apply
+        int ringCursor = 0;             // resume index within rings[next] when a tick's budget ran out mid-ring
 
         Active(ServerLevel level, double cx, double cy, double cz,
                List<List<Edit>> rings, List<long[]> forced, List<BlockPos> removed) {
             this.level = level; this.cx = cx; this.cy = cy; this.cz = cz;
             this.rings = rings; this.forced = forced; this.removed = removed;
+        }
+    }
+
+    private static final class Cleanup {
+        final ServerLevel level;
+        final ArrayDeque<BlockPos> queue;
+        final HashSet<Long> removedDone = new HashSet<>();
+        final HashSet<Long> fluidDone = new HashSet<>();
+        final List<long[]> forced;      // released when this cleanup completes
+        int remaining = ExplosionConfig.CLEANUP_MAX_OPS;   // hard cap so a pathological cascade can't run forever
+
+        Cleanup(ServerLevel level, List<BlockPos> removed, List<long[]> forced) {
+            this.level = level;
+            this.queue = new ArrayDeque<>(removed);
+            this.forced = forced;
         }
     }
 
@@ -63,54 +80,88 @@ public final class ExplosionScheduler {
     }
 
     public static void tick(ServerLevel level) {
-        if (ACTIVE.isEmpty()) return;
-        Iterator<Active> it = ACTIVE.iterator();
-        while (it.hasNext()) {
-            Active a = it.next();
-            if (a.level != level) continue;
-            int end = Math.min(a.next + ExplosionConfig.EXPANSION_SPEED, a.rings.size());
+        if (!ACTIVE.isEmpty()) {
+            int budget = ExplosionConfig.MAX_APPLY_BLOCKS_PER_TICK;   // shared across every active blast this tick
             BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos();
-            for (int ri = a.next; ri < end; ri++) {
-                for (Edit e : a.rings.get(ri)) {
-                    p.set(e.x, e.y, e.z);
-                    level.setBlock(p, e.state, WRITE_FLAGS);
+            Iterator<Active> it = ACTIVE.iterator();
+            while (it.hasNext()) {
+                Active a = it.next();
+                if (a.level != level) continue;
+                if (budget <= 0) continue;          // out of budget; this blast advances next tick
+
+                int front = -1;
+                int ringsThisTick = 0;
+                while (a.next < a.rings.size() && ringsThisTick < ExplosionConfig.EXPANSION_SPEED && budget > 0) {
+                    List<Edit> ring = a.rings.get(a.next);
+                    int i = a.ringCursor;
+                    for (; i < ring.size() && budget > 0; i++) {
+                        Edit e = ring.get(i);
+                        p.set(e.x, e.y, e.z);
+                        level.setBlock(p, e.state(), WRITE_FLAGS);
+                        budget--;
+                    }
+                    front = a.next;
+                    if (i < ring.size()) {          // budget ran out mid-ring; resume here next tick
+                        a.ringCursor = i;
+                        break;
+                    }
+                    a.ringCursor = 0;
+                    a.next++;
+                    ringsThisTick++;
+                }
+                if (front >= 0) spawnFront(a, front);
+                if (a.next >= a.rings.size()) {     // fully applied -> hand off to amortized cleanup
+                    CLEANUPS.add(new Cleanup(a.level, a.removed, a.forced));
+                    it.remove();
                 }
             }
-            spawnFront(a, end - 1);
-            a.next = end;
-            if (a.next >= a.rings.size()) {
-                finishCleanup(level, a.removed);
-                ChunkForce.release(level, a.forced);
+        }
+
+        tickCleanup(level);
+    }
+
+    private static void tickCleanup(ServerLevel level) {
+        if (CLEANUPS.isEmpty()) return;
+        int budget = ExplosionConfig.MAX_CLEANUP_OPS_PER_TICK;       // shared across every active cleanup this tick
+        BlockPos.MutableBlockPos np = new BlockPos.MutableBlockPos();
+        Iterator<Cleanup> it = CLEANUPS.iterator();
+        while (it.hasNext()) {
+            Cleanup cu = it.next();
+            if (cu.level != level) continue;
+            if (budget <= 0) continue;
+
+            while (!cu.queue.isEmpty() && budget > 0 && cu.remaining > 0) {
+                BlockPos p = cu.queue.poll();
+                for (Direction d : Direction.values()) {
+                    np.setWithOffset(p, d);
+                    BlockState s = level.getBlockState(np);
+                    if (s.isAir()) continue;
+
+                    FluidState fs = s.getFluidState();
+                    if (!fs.isEmpty() && cu.fluidDone.add(np.asLong())) {
+                        level.scheduleTick(np.immutable(), fs.getType(), fs.getType().getTickDelay(level));
+                    }
+
+                    if (!s.canSurvive(level, np) && cu.removedDone.add(np.asLong())) {
+                        BlockPos rp = np.immutable();
+                        level.setBlock(rp, Blocks.AIR.defaultBlockState(), WRITE_FLAGS);
+                        cu.queue.add(rp);   // its removal may unsupport / un-dam further blocks
+                    }
+                }
+                budget--;
+                cu.remaining--;
+            }
+
+            if (cu.queue.isEmpty() || cu.remaining <= 0) {   // done (or hit the safety cap) -> release chunks
+                ChunkForce.release(cu.level, cu.forced);
                 it.remove();
             }
         }
     }
 
-    private static void finishCleanup(ServerLevel level, List<BlockPos> removed) {
-        ArrayDeque<BlockPos> queue = new ArrayDeque<>(removed);
-        HashSet<Long> removedDone = new HashSet<>();
-        HashSet<Long> fluidDone = new HashSet<>();
-        BlockPos.MutableBlockPos np = new BlockPos.MutableBlockPos();
-        int budget = 400_000;
-        while (!queue.isEmpty() && budget-- > 0) {
-            BlockPos p = queue.poll();
-            for (Direction d : Direction.values()) {
-                np.setWithOffset(p, d);
-                BlockState s = level.getBlockState(np);
-                if (s.isAir()) continue;
-
-                FluidState fs = s.getFluidState();
-                if (!fs.isEmpty() && fluidDone.add(np.asLong())) {
-                    level.scheduleTick(np.immutable(), fs.getType(), fs.getType().getTickDelay(level));
-                }
-
-                if (!s.canSurvive(level, np) && removedDone.add(np.asLong())) {
-                    BlockPos rp = np.immutable();
-                    level.setBlock(rp, Blocks.AIR.defaultBlockState(), WRITE_FLAGS);
-                    queue.add(rp);   // its removal may unsupport / un-dam further blocks
-                }
-            }
-        }
+    public static void reset() {
+        ACTIVE.clear();
+        CLEANUPS.clear();
     }
 
     private static void spawnFront(Active a, int radius) {

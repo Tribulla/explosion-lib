@@ -3,6 +3,7 @@ package com.example.explosionlib.fabric;
 import com.example.explosionlib.CommonClass;
 import com.example.explosionlib.Constants;
 import com.example.explosionlib.engine.ChunkForce;
+import com.example.explosionlib.engine.Engine;
 import com.example.explosionlib.engine.ExplosionScheduler;
 import com.example.explosionlib.item.ExploderItem;
 import com.example.explosionlib.network.ExplodePayload;
@@ -39,6 +40,10 @@ public class ExplosionLibFabric implements ModInitializer {
             (payload, context) -> ServerExplodeHandler.handle(payload, context.player()));
 
         ServerTickEvents.END_WORLD_TICK.register(ExplosionScheduler::tick);
-        ServerLifecycleEvents.SERVER_STOPPING.register(server -> ChunkForce.releaseAll());
+        ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
+            Engine.onServerStopping();
+            ChunkForce.releaseAll();
+            ExplosionScheduler.reset();
+        });
     }
 }

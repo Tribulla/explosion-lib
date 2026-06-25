@@ -38,7 +38,7 @@ SCORCH_PROB = 0.6
 
 SHOCKWAVE_RADIUS = 3.5        # outer reach of the wave (* crater radius)
 SHOCKWAVE_TOUGHNESS_REF = 6.0  # blast_resistance at/below which stuff cracks freely
-SHOCKWAVE_CRACK_RATE = 0.7
+SHOCKWAVE_CRACK_RATE = 0.2    # fraction of exposed structural surface cracked to rubble in place;
 SHOCKWAVE_SHATTER_RATE = 1.2
 
 COLLAPSE_ITERS = 4        # max collapse passes (Jenga cascades)

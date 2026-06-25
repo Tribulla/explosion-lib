@@ -2,6 +2,7 @@ package com.example.explosionlib.neoforge;
 
 import com.example.explosionlib.Constants;
 import com.example.explosionlib.engine.ChunkForce;
+import com.example.explosionlib.engine.Engine;
 import com.example.explosionlib.engine.ExplosionScheduler;
 
 import net.minecraft.server.level.ServerLevel;
@@ -23,6 +24,8 @@ public final class NeoForgeServerEvents {
 
     @SubscribeEvent
     public static void onServerStopping(ServerStoppingEvent event) {
+        Engine.onServerStopping();
         ChunkForce.releaseAll();
+        ExplosionScheduler.reset();
     }
 }

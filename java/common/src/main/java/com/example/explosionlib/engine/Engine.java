@@ -4,8 +4,10 @@ import com.example.explosionlib.Constants;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.ParticleTypes;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.damagesource.DamageSource;
@@ -18,15 +20,25 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.example.explosionlib.engine.ExplosionConfig.*;
 
 public final class Engine {
     private Engine() {}
 
-    private static final ExecutorService WORKER = Executors.newFixedThreadPool(
-        Math.max(1, Runtime.getRuntime().availableProcessors() / 2),
+    private static final int POOL_SIZE = Math.max(1, Runtime.getRuntime().availableProcessors() / 2);
+    private static final ExecutorService WORKER = Executors.newFixedThreadPool(POOL_SIZE,
         run -> { Thread t = new Thread(run, "explosionlib-worker"); t.setDaemon(true); return t; });
+
+    private static final int MAX_INFLIGHT = Math.max(3, POOL_SIZE * 2);
+    private static final AtomicInteger INFLIGHT = new AtomicInteger();
+
+    private static final AtomicInteger GENERATION = new AtomicInteger();
+
+    public static void onServerStopping() {
+        GENERATION.incrementAndGet();
+    }
 
     public static void explode(ServerLevel level, BlockPos origin, ExplosionConfig cfg, Entity cause) {
         double r0est = Math.min(K_CRATER * Math.cbrt(Math.max(cfg.yield, 1e-6)), MAX_RADIUS);
@@ -34,27 +46,53 @@ public final class Engine {
         half = Math.min(half, MAX_REGION_HALF);                 // bound memory/CPU for giant yields
         half = Math.max(half, (int) Math.ceil(r0est) + 8);      // but always cover the full crater
 
-        List<long[]> forced = ChunkForce.force(level, origin, half);
-        VoxelRegion r = WorldAdapter.capture(level, origin, half);
-        int cx = origin.getX() - r.ox;   // engine x  <- world X
-        int cy = origin.getZ() - r.oy;   // engine y  <- world Z
-        int cz = origin.getY() - r.oz;   // engine z  <- world Y (vertical)
-        MinecraftServer server = level.getServer();
-
         if (cfg.entityDamage) applyEntityEffects(level, origin, r0est, cause);
         Vec3 c = Vec3.atCenterOf(origin);
         level.playSound(null, c.x, c.y, c.z, SoundEvents.GENERIC_EXPLODE, SoundSource.BLOCKS, 4.0f, 0.9f);
         level.sendParticles(ParticleTypes.EXPLOSION_EMITTER, c.x, c.y, c.z, 1, 0.0, 0.0, 0.0, 0.0);
 
+        if (INFLIGHT.get() >= MAX_INFLIGHT) {                   // server already saturated with blasts
+            Constants.LOG.warn("[explosionlib] {} explosion jobs in flight (max {}); skipping terrain for this blast",
+                INFLIGHT.get(), MAX_INFLIGHT);
+            if (cause instanceof ServerPlayer sp) {
+                sp.displayClientMessage(
+                    Component.literal("Too many explosions at once — terrain skipped, try again in a moment."), true);
+            }
+            return;
+        }
+
+        List<long[]> forced = ChunkForce.force(level, origin, half);
+        WorldAdapter.Snapshot snap;
+        try {
+            snap = WorldAdapter.snapshot(level, origin, half);  // cheap section copies, on the server thread
+        } catch (Throwable t) {
+            Constants.LOG.error("[explosionlib] explosion snapshot failed", t);
+            ChunkForce.release(level, forced);
+            return;
+        }
+
+        MinecraftServer server = level.getServer();
+        int gen = GENERATION.get();                            // the server epoch this blast belongs to
+        INFLIGHT.incrementAndGet();
         WORKER.execute(() -> {
             try {
+                VoxelRegion r = WorldAdapter.decode(snap);      // the heavy per-voxel decode, now off-thread
+                int cx = origin.getX() - r.ox;                  // engine x  <- world X
+                int cy = origin.getZ() - r.oy;                  // engine y  <- world Z
+                int cz = origin.getY() - r.oz;                  // engine z  <- world Y (vertical)
+                boolean[] frozen = cfg.gravity ? Collapse.computeFrozen(r) : null;
                 Blast.Result res = Blast.detonate(r, cx, cy, cz, cfg);
-                runPasses(r, res, cfg, cx, cy, cz);
+                runPasses(r, res, cfg, cx, cy, cz, frozen);
                 List<ExplosionScheduler.Edit> edits = diff(r);
-                server.execute(() -> ExplosionScheduler.schedule(level, origin, edits, forced));
+                server.execute(() -> {
+                    if (GENERATION.get() != gen) { ChunkForce.release(level, forced); return; }
+                    ExplosionScheduler.schedule(level, origin, edits, forced);
+                });
             } catch (Throwable t) {
                 Constants.LOG.error("[explosionlib] explosion compute failed", t);
                 server.execute(() -> ChunkForce.release(level, forced));
+            } finally {
+                INFLIGHT.decrementAndGet();
             }
         });
     }
@@ -81,7 +119,8 @@ public final class Engine {
         }
     }
 
-    private static void runPasses(VoxelRegion r, Blast.Result res, ExplosionConfig cfg, int cx, int cy, int cz) {
+    private static void runPasses(VoxelRegion r, Blast.Result res, ExplosionConfig cfg, int cx, int cy, int cz,
+                                  boolean[] frozen) {
         int margin = (int) Math.ceil(res.r0 * SHOCKWAVE_RADIUS) + 30;
         int wx0 = Math.max(cx - margin, 0), wx1 = Math.min(cx + margin + 1, r.nx);
         int wy0 = Math.max(cy - margin, 0), wy1 = Math.min(cy + margin + 1, r.ny);
@@ -89,12 +128,11 @@ public final class Engine {
         int dx0 = Math.max(cx - dm, 0), dx1 = Math.min(cx + dm + 1, r.nx);
         int dy0 = Math.max(cy - dm, 0), dy1 = Math.min(cy + dm + 1, r.ny);
 
-        if (cfg.gravity) Collapse.structuralCollapse(r, COLLAPSE_ITERS);
-        if (cfg.debris) applyDebris(r, res, cfg, cx, cy, cz);
+        if (cfg.gravity) Collapse.structuralCollapse(r, COLLAPSE_ITERS, frozen);
         if (cfg.gravity) Settle.granularSettle(r, wx0, wx1, wy0, wy1);
         Collapse.despeckle(r, dx0, dx1, dy0, dy1, DESPECKLE_ITERS);
         if (cfg.gravity) {
-            Collapse.structuralCollapse(r, 3);
+            Collapse.structuralCollapse(r, 3, frozen);
             Settle.granularSettle(r, wx0, wx1, wy0, wy1);
         }
     }
@@ -112,58 +150,4 @@ public final class Engine {
         return edits;
     }
 
-    private static void applyDebris(VoxelRegion r, Blast.Result res, ExplosionConfig cfg, int cx, int cy, int cz) {
-        Noise.DetRandom rng = new Noise.DetRandom(cfg.seed * 2654435761L);
-        List<int[]> coords = res.debrisStruct;
-        int k = (int) Math.round(DEBRIS_FRACTION * res.openness * coords.size());
-        k = Math.min(k, DEBRIS_MAX_PARTICLES);
-
-        if (k > 0 && !coords.isEmpty()) {
-            int[] order = new int[coords.size()];
-            for (int i = 0; i < order.length; i++) order[i] = i;
-            for (int i = order.length - 1; i > 0; i--) { // deterministic Fisher-Yates
-                int j = rng.nextInt(i + 1);
-                int t = order[i]; order[i] = order[j]; order[j] = t;
-            }
-            double cfx = cx + 0.5, cfy = cy + 0.5, cfz = cz + 0.5;
-            for (int s = 0; s < k; s++) {
-                int[] c = coords.get(order[s]);
-                double px = c[0] + 0.5, py = c[1] + 0.5, pz = c[2] + 0.5;
-                double ox = px - cfx, oy = py - cfy, oz = pz - cfz;
-                double n = Math.sqrt(ox * ox + oy * oy + oz * oz);
-                double dx, dy, dz;
-                if (n < 1e-6) { dx = 0; dy = 0; dz = 1; } else { dx = ox / n; dy = oy / n; dz = oz / n; }
-                double vx = dx * DEBRIS_SPEED + rng.nextGaussian() * DEBRIS_SPEED * DEBRIS_SCATTER;
-                double vy = dy * DEBRIS_SPEED + rng.nextGaussian() * DEBRIS_SPEED * DEBRIS_SCATTER;
-                double vz = dz * DEBRIS_SPEED + DEBRIS_SPEED * UP_BIAS + rng.nextGaussian() * DEBRIS_SPEED * DEBRIS_SCATTER;
-                for (int step = 0; step < DEBRIS_MAX_STEPS; step++) {
-                    vz -= DEBRIS_GRAVITY * DEBRIS_DT;
-                    px += vx * DEBRIS_DT; py += vy * DEBRIS_DT; pz += vz * DEBRIS_DT;
-                    int ix = (int) Math.round(px), iy = (int) Math.round(py);
-                    if (ix < 0 || iy < 0 || ix >= r.nx || iy >= r.ny) break; // off the region -> lost
-                    int land = firstSolidAbove(r, ix, iy);
-                    if (pz <= land) { deposit(r, ix, iy, land); break; }
-                }
-            }
-        }
-        for (int[] c : res.rim) deposit(r, c[0], c[1], firstSolidAbove(r, c[0], c[1]));
-        for (int[] c : res.ejecta) deposit(r, c[0], c[1], firstSolidAbove(r, c[0], c[1]));
-    }
-
-    private static int firstSolidAbove(VoxelRegion r, int x, int y) {
-        for (int z = r.nz - 1; z >= 0; z--) {
-            if (Material.isSolid(r.id[r.idx(x, y, z)])) return z + 1;
-        }
-        return 0;
-    }
-
-    private static void deposit(VoxelRegion r, int x, int y, int land) {
-        if (land < 0 || land >= r.nz) return;
-        int i = r.idx(x, y, land);
-        if (r.id[i] == Material.AIR) {
-            r.id[i] = Material.RUBBLE;
-            r.state[i] = Palette.RUBBLE;
-            r.resist[i] = (float) Palette.RUBBLE.getBlock().getExplosionResistance();
-        }
-    }
 }

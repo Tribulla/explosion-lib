@@ -39,7 +39,22 @@ def despeckle(mat, region, iters=None):
     return mat
 
 
-def structural_collapse(mat, connectivity=CONN6, max_iters=None):
+def frozen_mask(mat, connectivity=CONN6):
+    solid = IS_SOLID[mat]
+    labels, n = ndimage.label(solid, structure=connectivity)
+    if n == 0:
+        return np.zeros_like(solid)
+    faces = np.concatenate([
+        labels[0, :, :].ravel(), labels[-1, :, :].ravel(),
+        labels[:, 0, :].ravel(), labels[:, -1, :].ravel(),
+        labels[:, :, 0].ravel(), labels[:, :, -1].ravel(),
+    ])
+    anchored = np.unique(faces)
+    anchored = anchored[anchored != 0]
+    return solid & ~np.isin(labels, anchored)
+
+
+def structural_collapse(mat, connectivity=CONN6, max_iters=None, frozen=None):
     if max_iters is None:
         max_iters = config.COLLAPSE_ITERS
     nz = mat.shape[2]
@@ -49,7 +64,14 @@ def structural_collapse(mat, connectivity=CONN6, max_iters=None):
         labels, n = ndimage.label(solid, structure=connectivity)
         if n == 0:
             break
-        anchored = np.unique(labels[:, :, 0])
+        anchor_src = [
+            labels[0, :, :].ravel(), labels[-1, :, :].ravel(),
+            labels[:, 0, :].ravel(), labels[:, -1, :].ravel(),
+            labels[:, :, 0].ravel(), labels[:, :, -1].ravel(),
+        ]
+        if frozen is not None:
+            anchor_src.append(labels[frozen])
+        anchored = np.unique(np.concatenate(anchor_src))
         anchored = anchored[anchored != 0]
         supported = np.isin(labels, anchored)
         floating = solid & ~supported & (mat != BEDROCK)

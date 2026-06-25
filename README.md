@@ -39,23 +39,33 @@ gives a different-but-believable one.
      an open surface burst throws a full ejecta blanket, while a deeply buried one stays contained
      (a clean cavity, almost no surface mess) — like a camouflet.
 3. **Shockwave** — a pressure wave reaching ~3.5× the crater radius *damages* (rather than excavates)
-   whatever it touches: brittle materials (glass, leaves) shatter, structures crack into rubble.
+   whatever it touches: brittle materials (glass, leaves) shatter, structural blocks crack **in place**
+   into rubble (gravel). This is the **only** source of rubble — nothing is ever spawned into empty air.
    Intensity falls off with distance and is scaled by each material's fragility, so glass and trees get
    wrecked far out while obsidian and metal mostly shrug it off. It only hits **exposed** surfaces
-   (spalling), so it never cracks deep buried rock into standing gravel pillars. Cracked rubble then
-   crumbles when it settles.
+   (spalling), so it never cracks deep buried rock into standing gravel pillars, and the crack rate is
+   kept low so the blast isn't blanketed in gravel. Cracked rubble then crumbles when it settles. The
+   **debris** toggle gates this rubble entirely — turn it off and the shockwave only shatters brittle
+   blocks, leaving structural ones intact (and the blast gravel-free).
 4. **Scorching** — surviving rock around the rim is recolored to a charred material.
-5. **Structural collapse** — connected-component labelling finds solid chunks no longer attached to
-   bedrock; they drop as rigid bodies and land on whatever has already settled. (This is what makes an
-   undercut tree topple.)
-6. **Debris** — a fraction of destroyed structural voxels are flung ballistically and re-deposited as
-   rubble; a raised rim and a thinning ejecta blanket are laid around the crater.
-7. **Granular settling** — loose materials (sand, dirt, rubble) flow to their angle of repose;
+5. **Structural collapse** — connected-component labelling drops solid chunks the blast has left
+   unsupported. A chunk is held in place if it still reaches bedrock, **the captured region's boundary**
+   (a mass leaving through a wall connects to the un-captured world outside), **or was already unsupported
+   before the blast** — terrain that the region merely *clips* into looking detached (a mountainside
+   anchored below the cube, an overhang reached through a cave, a floating island) is recorded up front
+   and never relocated. So only what the explosion itself undercuts actually falls (an undercut tree
+   topples), and terrain the blast never touched stays exactly where it was.
+6. **Granular settling** — loose materials (sand, dirt, rubble) flow to their angle of repose;
    structural materials keep their overhangs. Localized to the blast region, so cost scales with the
    blast, not the world.
-8. **Despeckle** — a final morphological pass (over the crater/ejecta zone only) erodes lone spikes,
+7. **Despeckle** — a final morphological pass (over the crater zone only) erodes lone spikes,
    isolated single-voxel bumps, and thin 1-wide vertical pillars, so the result reads as a smooth bowl
    rather than a jagged jumble or a forest of columns.
+
+> **No synthetic ejecta.** Earlier versions also flung a fraction of destroyed blocks ballistically and
+> laid a raised rim + thinning ejecta blanket of *new* gravel around the crater. That spawned a lot of
+> gravel out of thin air (and rained it onto the ground under high airbursts), so it was removed: debris
+> is now strictly *existing blocks broken in place*, never newly-spawned blocks.
 
 ### Materials
 
@@ -120,7 +130,7 @@ python/
     world.py       World container + terrain generation
     blast.py       ray-cast shielding + stochastic crater + scorch
     collapse.py    rigid-body structural collapse (scipy.ndimage)
-    debris.py      ballistic debris + rim/ejecta deposition
+    debris.py      ballistic debris + rim/ejecta deposition (retired — kept for reference, no longer in the pipeline)
     settle.py      granular settling for loose materials
     simulate.py    the full post-explosion pipeline
     render/        pyvista (primary) + matplotlib (fallback) viewers
@@ -213,15 +223,28 @@ toughness drives the shielding and crater shape. Cracked rubble → `GRAVEL`, sc
 (edit `engine/Palette.java`). All tunables live in `engine/ExplosionConfig.java` (same numbers as the
 Python `config.py`).
 
-**Big yields, no freeze.** Yield goes up to **1024** (crater radius capped at `MAX_RADIUS = 40`,
-captured region at `MAX_REGION_HALF = 80`). The heavy pipeline runs **off the main thread** on the
-captured snapshot (pure array math, no world access), then the result is marshalled back to the server
-thread to apply — so even a yield-1024 blast doesn't lock up the tick.
+**Big yields, many blasts, no freeze.** Yield goes up to **1024** (crater radius capped at
+`MAX_RADIUS = 40`, captured region at `MAX_REGION_HALF = 80`). The work is split so the server thread
+only ever does a small, *bounded* amount per tick:
 
-**Real-time playout.** The result is applied **ring-by-ring outward** over server ticks
-(`EXPANSION_SPEED` blocks/tick) with a boom + explosion/smoke particles at the moving front, so the
-shockwave reads as an expanding wave. The affected area's chunks are **force-loaded** (ref-counted)
-for the duration, so the blast also destroys blocks in chunks that weren't loaded.
+- **Capture is off-thread.** On the server thread we only copy the `PalettedContainer` of each chunk
+  section overlapping the region (a handful of small array copies per chunk — the same trick Minecraft
+  uses to serialize chunks asynchronously). The millions-of-voxels decode (classify + blast-resistance
+  lookup) then runs on a worker thread off that snapshot, alongside the rest of the pipeline (pure array
+  math, no world access). The result is marshalled back to the server thread to apply.
+- **A concurrency cap** (`MAX_INFLIGHT`, derived from core count) limits how many heavy blasts compute
+  at once; a fixed worker pool (`cores/2`) does the math. Past the cap, a blast still booms and hurts
+  entities but sheds its terrain edits (logged) rather than risking an out-of-memory — so spamming huge
+  blasts can't pile up unbounded snapshots/regions.
+- **Global per-tick budgets.** Edits are applied **ring-by-ring outward** over server ticks
+  (`EXPANSION_SPEED` rings/tick *per blast*), but a shared `MAX_APPLY_BLOCKS_PER_TICK` budget caps the
+  *total* block writes across **all** concurrent blasts in a level — so ten overlapping explosions share
+  one budget instead of each adding their own load. The post-blast cleanup flood-fill is likewise spread
+  across ticks under its own `MAX_CLEANUP_OPS_PER_TICK` budget instead of running as a single burst.
+
+A boom + explosion/smoke particles play at each blast's moving front, so the shockwave reads as an
+expanding wave. The affected area's chunks are **force-loaded** (ref-counted) until that blast's cleanup
+finishes, so the blast also destroys blocks in chunks that weren't loaded.
 
 **Tidy aftermath.** When a blast finishes, a cleanup pass cascades out from the removed blocks and:
 (a) drops grass / vines / glow lichen / torches left floating (vanilla `canSurvive`), and (b) schedules
