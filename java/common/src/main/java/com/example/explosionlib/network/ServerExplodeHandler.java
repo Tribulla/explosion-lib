@@ -6,7 +6,6 @@ import com.example.explosionlib.engine.ExplosionConfig;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.util.Mth;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
@@ -32,14 +31,12 @@ public final class ServerExplodeHandler {
         }
 
         ExplosionConfig cfg = new ExplosionConfig();
-        cfg.yield = Mth.clamp(p.yield(), 0.5f, 1024.0f);   // validate untrusted input
+        cfg.yield = Math.max(p.yield(), 0.5f);             // floor only; size is bounded automatically by the region
         cfg.seed = level.getRandom().nextLong();           // fresh each blast -> always a new crater
-        int f = p.flags();
-        cfg.shockwave = (f & 1) != 0;
-        cfg.gravity = (f & 2) != 0;
-        cfg.debris = (f & 4) != 0;
-        cfg.scorch = (f & 8) != 0;
-        cfg.entityDamage = (f & 16) != 0;
+        int f = p.flags();                                 // per-blast client toggles, gated by the server config
+        cfg.shockwave = (f & 1) != 0 && ExplosionConfig.ALLOW_SHOCKWAVE;
+        cfg.scorch = (f & 8) != 0 && ExplosionConfig.ALLOW_SCORCH;
+        cfg.entityDamage = (f & 16) != 0 && ExplosionConfig.ALLOW_ENTITY_DAMAGE;
 
         Engine.explode(level, origin, cfg, player);
     }

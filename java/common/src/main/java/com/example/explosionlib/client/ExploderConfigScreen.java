@@ -7,7 +7,7 @@ import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
 public class ExploderConfigScreen extends Screen {
-    private static final float MIN_YIELD = 0.5f, MAX_YIELD = 1024.0f;
+    private static final float MIN_YIELD = 0.5f, MAX_YIELD = 16384.0f;
     private final Screen parent;
 
     public ExploderConfigScreen(Screen parent) {
@@ -24,10 +24,6 @@ public class ExploderConfigScreen extends Screen {
         addRenderableWidget(new YieldSlider(x, y, w, 20));
         y += 24;
         addRenderableWidget(toggle(x, y, w, "Shockwave", () -> ClientConfig.shockwave, v -> ClientConfig.shockwave = v));
-        y += 24;
-        addRenderableWidget(toggle(x, y, w, "Gravity collapse", () -> ClientConfig.gravity, v -> ClientConfig.gravity = v));
-        y += 24;
-        addRenderableWidget(toggle(x, y, w, "Debris", () -> ClientConfig.debris, v -> ClientConfig.debris = v));
         y += 24;
         addRenderableWidget(toggle(x, y, w, "Scorch", () -> ClientConfig.scorch, v -> ClientConfig.scorch = v));
         y += 24;

@@ -84,25 +84,33 @@ public final class Blast {
             }
         }
 
-        int half = (int) Math.ceil(r0 * EJECTA_OUTER * (1.0 + CRATER_ANISOTROPY)) + 2;
-        int x0 = Math.max(cx - half, 0), x1 = Math.min(cx + half + 1, r.nx);
-        int y0 = Math.max(cy - half, 0), y1 = Math.min(cy + half + 1, r.ny);
-        int z0 = Math.max(cz - half, 0), z1 = Math.min(cz + half + 1, r.nz);
+        final double reffMax = r0 * (1.0 + CRATER_ANISOTROPY);
+        final double vradMax = Math.max(reffMax * CRATER_VERTICAL, 1e-3);
+        final double invReffMax2 = 1.0 / (reffMax * reffMax);
+        final double invVradMax2 = 1.0 / (vradMax * vradMax);
+        int xyHalf = (int) Math.ceil(reffMax) + 2;
+        int zHalf = (int) Math.ceil(reffMax * CRATER_VERTICAL) + 2;
+        int x0 = Math.max(cx - xyHalf, 0), x1 = Math.min(cx + xyHalf + 1, r.nx);
+        int y0 = Math.max(cy - xyHalf, 0), y1 = Math.min(cy + xyHalf + 1, r.ny);
+        int z0 = Math.max(cz - zHalf, 0), z1 = Math.min(cz + zHalf + 1, r.nz);
         for (int x = x0; x < x1; x++)
             for (int y = y0; y < y1; y++)
                 for (int z = z0; z < z1; z++) {
+                    int i = r.idx(x, y, z);
+                    int role = r.id[i];
+                    if (!Material.isDestructible(role)) continue;                 // guard 1
                     double offx = x - cx, offy = y - cy, offz = z - cz;
-                    double dd = Math.sqrt(offx * offx + offy * offy + offz * offz);
+                    double horiz2 = offx * offx + offy * offy, offz2 = offz * offz;
+                    double ellMin = horiz2 * invReffMax2 + offz2 * invVradMax2;   // guard 3: ell at reff=reffMax
+                    if (ellMin >= 1.0) continue;
+                    double dd = Math.sqrt(horiz2 + offz2);
                     double safe = Math.max(dd, 1e-9);
                     double reff = r0 * (1.0 + CRATER_ANISOTROPY *
                         noise.fbm(offx / safe * CRATER_NOISE_FREQ, offy / safe * CRATER_NOISE_FREQ,
                                   offz / safe * CRATER_NOISE_FREQ, 4));
                     reff = Math.max(reff, 1e-3);
                     double vrad = Math.max(reff * CRATER_VERTICAL, 1e-3);
-                    double ell = (offx * offx + offy * offy) / (reff * reff) + (offz / vrad) * (offz / vrad);
-                    int i = r.idx(x, y, z);
-                    int role = r.id[i];
-                    if (!Material.isDestructible(role)) continue;
+                    double ell = horiz2 / (reff * reff) + (offz / vrad) * (offz / vrad);
                     boolean inCore = ell < CORE_FRAC * CORE_FRAC;
                     if (inCore) {
                         destroy[i] = true;
@@ -116,7 +124,7 @@ public final class Blast {
             if (destroy[i] && r.id[i] != Material.UNBREAKABLE) { r.id[i] = Material.AIR; r.state[i] = Palette.AIR; }
         }
 
-        if (cfg.shockwave) applyShockwave(r, noise, cx, cy, cz, r0, openness, cfg.seed, cfg.debris);
+        if (cfg.shockwave) applyShockwave(r, noise, cx, cy, cz, r0, openness, cfg.seed);
 
         if (cfg.scorch) applyScorch(r, cx, cy, cz, r0, cfg.seed);
 
@@ -124,8 +132,7 @@ public final class Blast {
     }
 
     private static void applyShockwave(VoxelRegion r, Noise.ValueNoise3D noise,
-                                       int cx, int cy, int cz, double r0, double openness, long seed,
-                                       boolean leaveRubble) {
+                                       int cx, int cy, int cz, double r0, double openness, long seed) {
         double rs = r0 * SHOCKWAVE_RADIUS;
         double span = Math.max(rs - r0, 1e-6);
         int half = (int) Math.ceil(rs) + 1;
@@ -148,7 +155,7 @@ public final class Blast {
                         if (h < clamp(intensity * openness * SHOCKWAVE_SHATTER_RATE, 0.0, 1.0)) {
                             r.id[i] = Material.AIR; r.state[i] = Palette.AIR;
                         }
-                    } else if (leaveRubble && Material.isStruct(role)) {   // rigid blocks crack in place to rubble
+                    } else if (Material.isStruct(role)) {   // rigid blocks crack in place to rubble (gravel)
                         double fragility = clamp(SHOCKWAVE_TOUGHNESS_REF / Math.max(r.resist[i], 1e-6), 0.0, 1.0);
                         if (fragility < 0.05) fragility = 0.0;
                         if (h < clamp(intensity * fragility * openness * SHOCKWAVE_CRACK_RATE, 0.0, 1.0)) {

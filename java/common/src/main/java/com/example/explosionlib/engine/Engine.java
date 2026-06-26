@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static com.example.explosionlib.engine.ExplosionConfig.*;
 
@@ -31,8 +32,7 @@ public final class Engine {
     private static final ExecutorService WORKER = Executors.newFixedThreadPool(POOL_SIZE,
         run -> { Thread t = new Thread(run, "explosionlib-worker"); t.setDaemon(true); return t; });
 
-    private static final int MAX_INFLIGHT = Math.max(3, POOL_SIZE * 2);
-    private static final AtomicInteger INFLIGHT = new AtomicInteger();
+    private static final AtomicLong INFLIGHT_BYTES = new AtomicLong();
 
     private static final AtomicInteger GENERATION = new AtomicInteger();
 
@@ -45,18 +45,21 @@ public final class Engine {
         int half = (int) Math.ceil(r0est * SHOCKWAVE_RADIUS * 1.1) + 6;
         half = Math.min(half, MAX_REGION_HALF);                 // bound memory/CPU for giant yields
         half = Math.max(half, (int) Math.ceil(r0est) + 8);      // but always cover the full crater
+        final int regionHalf = half;                            // captured (effectively-final) for the worker lambda
 
         if (cfg.entityDamage) applyEntityEffects(level, origin, r0est, cause);
         Vec3 c = Vec3.atCenterOf(origin);
         level.playSound(null, c.x, c.y, c.z, SoundEvents.GENERIC_EXPLODE, SoundSource.BLOCKS, 4.0f, 0.9f);
         level.sendParticles(ParticleTypes.EXPLOSION_EMITTER, c.x, c.y, c.z, 1, 0.0, 0.0, 0.0, 0.0);
 
-        if (INFLIGHT.get() >= MAX_INFLIGHT) {                   // server already saturated with blasts
-            Constants.LOG.warn("[explosionlib] {} explosion jobs in flight (max {}); skipping terrain for this blast",
-                INFLIGHT.get(), MAX_INFLIGHT);
+        long thisBytes = ExplosionConfig.regionBytes(half);
+        long inflight = INFLIGHT_BYTES.get();
+        if (inflight > 0 && inflight + thisBytes > REGION_BUDGET_BYTES) {
+            Constants.LOG.warn("[explosionlib] explosion RAM budget reached ({} MB in flight); skipping terrain for this blast",
+                inflight >> 20);
             if (cause instanceof ServerPlayer sp) {
                 sp.displayClientMessage(
-                    Component.literal("Too many explosions at once — terrain skipped, try again in a moment."), true);
+                    Component.literal("Too many large explosions at once — terrain skipped, try again in a moment."), true);
             }
             return;
         }
@@ -73,26 +76,40 @@ public final class Engine {
 
         MinecraftServer server = level.getServer();
         int gen = GENERATION.get();                            // the server epoch this blast belongs to
-        INFLIGHT.incrementAndGet();
+        INFLIGHT_BYTES.addAndGet(thisBytes);
         WORKER.execute(() -> {
             try {
+                long t0 = System.nanoTime();
                 VoxelRegion r = WorldAdapter.decode(snap);      // the heavy per-voxel decode, now off-thread
+                long tDecode = System.nanoTime();
                 int cx = origin.getX() - r.ox;                  // engine x  <- world X
                 int cy = origin.getZ() - r.oy;                  // engine y  <- world Z
                 int cz = origin.getY() - r.oz;                  // engine z  <- world Y (vertical)
-                boolean[] frozen = cfg.gravity ? Collapse.computeFrozen(r) : null;
                 Blast.Result res = Blast.detonate(r, cx, cy, cz, cfg);
-                runPasses(r, res, cfg, cx, cy, cz, frozen);
+                long tDet = System.nanoTime();
+                runPasses(r, res, cx, cy);
+                long tPasses = System.nanoTime();
                 List<ExplosionScheduler.Edit> edits = diff(r);
+                List<BlockPos> cleanupSeeds = cleanupSeeds(r);   // only the crater surface, not its volume
+                long tDiff = System.nanoTime();
+                Constants.LOG.info(
+                    "[explosionlib] compute {}ms (region {}^3, {} edits): decode={} detonate={} passes={} diff+seeds={}",
+                    (tDiff - t0) / 1_000_000, r.nx, edits.size(), (tDecode - t0) / 1_000_000,
+                    (tDet - tDecode) / 1_000_000, (tPasses - tDet) / 1_000_000, (tDiff - tPasses) / 1_000_000);
                 server.execute(() -> {
                     if (GENERATION.get() != gen) { ChunkForce.release(level, forced); return; }
-                    ExplosionScheduler.schedule(level, origin, edits, forced);
+                    ExplosionScheduler.schedule(level, origin, edits, cleanupSeeds, forced);
+                    // The full shockwave reaches past the captured region; fill in that far ring on the live
+                    // world (strips foliage / shatters glass out to the true reach, in loaded chunks only).
+                    if (cfg.shockwave) {
+                        OuterShockwave.start(level, origin, res.r0, regionHalf, res.openness, cfg.seed);
+                    }
                 });
             } catch (Throwable t) {
                 Constants.LOG.error("[explosionlib] explosion compute failed", t);
                 server.execute(() -> ChunkForce.release(level, forced));
             } finally {
-                INFLIGHT.decrementAndGet();
+                INFLIGHT_BYTES.addAndGet(-thisBytes);
             }
         });
     }
@@ -119,22 +136,14 @@ public final class Engine {
         }
     }
 
-    private static void runPasses(VoxelRegion r, Blast.Result res, ExplosionConfig cfg, int cx, int cy, int cz,
-                                  boolean[] frozen) {
-        int margin = (int) Math.ceil(res.r0 * SHOCKWAVE_RADIUS) + 30;
-        int wx0 = Math.max(cx - margin, 0), wx1 = Math.min(cx + margin + 1, r.nx);
-        int wy0 = Math.max(cy - margin, 0), wy1 = Math.min(cy + margin + 1, r.ny);
+    private static void runPasses(VoxelRegion r, Blast.Result res, int cx, int cy) {
         int dm = (int) Math.ceil(res.r0 * EJECTA_OUTER) + 6;
         int dx0 = Math.max(cx - dm, 0), dx1 = Math.min(cx + dm + 1, r.nx);
         int dy0 = Math.max(cy - dm, 0), dy1 = Math.min(cy + dm + 1, r.ny);
 
-        if (cfg.gravity) Collapse.structuralCollapse(r, COLLAPSE_ITERS, frozen);
-        if (cfg.gravity) Settle.granularSettle(r, wx0, wx1, wy0, wy1);
+        long s = System.nanoTime();
         Collapse.despeckle(r, dx0, dx1, dy0, dy1, DESPECKLE_ITERS);
-        if (cfg.gravity) {
-            Collapse.structuralCollapse(r, 3, frozen);
-            Settle.granularSettle(r, wx0, wx1, wy0, wy1);
-        }
+        Constants.LOG.info("[explosionlib]   passes: despeckle={}ms", (System.nanoTime() - s) / 1_000_000);
     }
 
     private static List<ExplosionScheduler.Edit> diff(VoxelRegion r) {
@@ -148,6 +157,33 @@ public final class Engine {
                     }
                 }
         return edits;
+    }
+
+    private static List<BlockPos> cleanupSeeds(VoxelRegion r) {
+        List<BlockPos> seeds = new ArrayList<>();
+        for (int ex = 0; ex < r.nx; ex++)
+            for (int ey = 0; ey < r.ny; ey++)
+                for (int ez = 0; ez < r.nz; ez++) {
+                    if (!clearedToAir(r, r.idx(ex, ey, ez))) continue;
+                    if (onRemovedBoundary(r, ex, ey, ez)) {
+                        seeds.add(new BlockPos(r.ox + ex, r.oz + ez, r.oy + ey));
+                    }
+                }
+        return seeds;
+    }
+
+    private static boolean clearedToAir(VoxelRegion r, int i) {
+        return r.state[i] != r.orig[i] && r.state[i].isAir();   // a solid voxel the blast turned to air
+    }
+
+    private static boolean onRemovedBoundary(VoxelRegion r, int x, int y, int z) {
+        int[][] n6 = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+        for (int[] d : n6) {
+            int ax = x + d[0], ay = y + d[1], az = z + d[2];
+            if (!r.inBounds(ax, ay, az)) return true;                 // region edge: the world beyond may need cleanup
+            if (!clearedToAir(r, r.idx(ax, ay, az))) return true;     // neighbour survived / was air / is a decoration
+        }
+        return false;
     }
 
 }

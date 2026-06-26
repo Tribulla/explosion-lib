@@ -57,26 +57,26 @@ public final class ExplosionScheduler {
         }
     }
 
-    public static void schedule(ServerLevel level, BlockPos center, List<Edit> edits, List<long[]> forced) {
+    public static void schedule(ServerLevel level, BlockPos center, List<Edit> edits,
+                                List<BlockPos> cleanupSeeds, List<long[]> forced) {
         double cx = center.getX() + 0.5, cy = center.getY() + 0.5, cz = center.getZ() + 0.5;
         if (edits.isEmpty()) {
             ChunkForce.release(level, forced);
             return;
         }
-        int maxRing = 0;
+        ACTIVE.add(new Active(level, cx, cy, cz, ringify(edits, cx, cy, cz), forced, cleanupSeeds));
+    }
+
+    private static List<List<Edit>> ringify(List<Edit> edits, double cx, double cy, double cz) {
+        int maxRing = -1;
         for (Edit e : edits) {
             int d = ringOf(e, cx, cy, cz);
             if (d > maxRing) maxRing = d;
         }
         List<List<Edit>> rings = new ArrayList<>(maxRing + 1);
         for (int i = 0; i <= maxRing; i++) rings.add(new ArrayList<>());
-        List<BlockPos> removed = new ArrayList<>();
-        for (Edit e : edits) {
-            rings.get(ringOf(e, cx, cy, cz)).add(e);
-            if (e.state().isAir()) removed.add(new BlockPos(e.x, e.y, e.z));
-        }
-
-        ACTIVE.add(new Active(level, cx, cy, cz, rings, forced, removed));
+        for (Edit e : edits) rings.get(ringOf(e, cx, cy, cz)).add(e);
+        return rings;
     }
 
     public static void tick(ServerLevel level) {
@@ -118,6 +118,7 @@ public final class ExplosionScheduler {
         }
 
         tickCleanup(level);
+        OuterShockwave.tick(level);   // ripple the shockwave out past the captured region (live world)
     }
 
     private static void tickCleanup(ServerLevel level) {
@@ -162,6 +163,7 @@ public final class ExplosionScheduler {
     public static void reset() {
         ACTIVE.clear();
         CLEANUPS.clear();
+        OuterShockwave.reset();
     }
 
     private static void spawnFront(Active a, int radius) {

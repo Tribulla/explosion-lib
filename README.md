@@ -11,10 +11,10 @@ the same model on real blocks.
   mod (**NeoForge + Fabric**) that ports the engine to live Minecraft blocks, with a debug item that
   blows up the world in real time.
 
-The blast model aims for *plausible, varied* results — ray-cast shielding, per-material resistance, a
-shockwave, gravity collapse, ejected debris — with enough seeded randomness that **no two detonations
-look the same**. The two engines share one model; the Python side is the reference (the mod is a
-faithful port, even down to a bit-for-bit reimplementation of the value noise).
+The blast model aims for *plausible, varied* results — ray-cast shielding, per-material resistance, and
+a shockwave that cracks and shatters — with enough seeded randomness that **no two detonations look the
+same**. The two engines share one model; the Python side is the reference (the mod is a faithful port,
+even down to a bit-for-bit reimplementation of the value noise).
 
 ---
 
@@ -35,32 +35,34 @@ gives a different-but-believable one.
    upper half is just air, so it reads as a bowl; a *buried* burst clears the whole void instead of
    leaving pillars. The ray pass then extends the reach in soft materials, so dirt excavates farther
    than stone.
-   * A **containment** factor (how much solid caps the burst) scales the shockwave, ejecta and debris:
-     an open surface burst throws a full ejecta blanket, while a deeply buried one stays contained
-     (a clean cavity, almost no surface mess) — like a camouflet.
+   * A **containment** factor (how much solid caps the burst) scales the shockwave: an open surface
+     burst spalls a wide area, while a deeply buried one stays contained (a clean cavity, almost no
+     surface mess) — like a camouflet.
 3. **Shockwave** — a pressure wave reaching ~3.5× the crater radius *damages* (rather than excavates)
    whatever it touches: brittle materials (glass, leaves) shatter, structural blocks crack **in place**
    into rubble (gravel). This is the **only** source of rubble — nothing is ever spawned into empty air.
    Intensity falls off with distance and is scaled by each material's fragility, so glass and trees get
    wrecked far out while obsidian and metal mostly shrug it off. It only hits **exposed** surfaces
    (spalling), so it never cracks deep buried rock into standing gravel pillars, and the crack rate is
-   kept low so the blast isn't blanketed in gravel. Cracked rubble then crumbles when it settles. The
-   **debris** toggle gates this rubble entirely — turn it off and the shockwave only shatters brittle
-   blocks, leaving structural ones intact (and the blast gravel-free).
+   kept low so the blast isn't blanketed in gravel. The
+   crack rate (config `shockwaveCrackRate`) is how much gravel the shockwave leaves; set it to `0` for a
+   shockwave that only shatters brittle blocks and leaves structural ones intact (gravel-free).
+   * **Outer shockwave.** The full 3.5× wave can reach far past the bounded voxel region a big crater fits
+     in (holding it all in RAM would cost gigabytes). So past the region edge it continues as a lightweight
+     *live-world* ripple (`engine/OuterShockwave.java`): it expands outward ring-by-ring over a few ticks,
+     stripping foliage and shattering glass with the same falloff, in **already-loaded chunks only** (it
+     never force-loads terrain). That's what makes a forest visibly ripple out to the full shockwave radius
+     instead of stopping at the crater's captured region.
 4. **Scorching** — surviving rock around the rim is recolored to a charred material.
-5. **Structural collapse** — connected-component labelling drops solid chunks the blast has left
-   unsupported. A chunk is held in place if it still reaches bedrock, **the captured region's boundary**
-   (a mass leaving through a wall connects to the un-captured world outside), **or was already unsupported
-   before the blast** — terrain that the region merely *clips* into looking detached (a mountainside
-   anchored below the cube, an overhang reached through a cave, a floating island) is recorded up front
-   and never relocated. So only what the explosion itself undercuts actually falls (an undercut tree
-   topples), and terrain the blast never touched stays exactly where it was.
-6. **Granular settling** — loose materials (sand, dirt, rubble) flow to their angle of repose;
-   structural materials keep their overhangs. Localized to the blast region, so cost scales with the
-   blast, not the world.
-7. **Despeckle** — a final morphological pass (over the crater zone only) erodes lone spikes,
+5. **Despeckle** — a final morphological pass (over the crater zone only) erodes lone spikes,
    isolated single-voxel bumps, and thin 1-wide vertical pillars, so the result reads as a smooth bowl
    rather than a jagged jumble or a forest of columns.
+
+> **No gravity simulation.** Earlier versions ran a structural-collapse pass (connected-component
+> labelling that dropped blast-undercut chunks to the floor) and a granular-settle pass (loose materials
+> flowing to their angle of repose). Both were removed: for big blasts they dominated the pre-first-block
+> compute without changing the crater itself, so undercut terrain now stays put and loose blocks are left
+> to vanilla physics.
 
 > **No synthetic ejecta.** Earlier versions also flung a fraction of destroyed blocks ballistically and
 > laid a raised rim + thinning ejecta blanket of *new* gravel around the crater. That spawned a lot of
@@ -76,12 +78,12 @@ and flags for whether it flows like sand or drops as a rigid chunk:
 | --- | --- | --- |
 | dirt / grass / sand | very low | excavate easily, flow into piles |
 | stone | medium | rigid, scorches, cracks to rubble near a blast |
-| metal | high | strong shield, rigid, heavy debris |
+| metal | high | strong shield, rigid |
 | glass | low | brittle — shatters from the shockwave far away |
 | **obsidian** | enormous | near explosion-proof — the canonical shield |
-| wood (trunks) | low-med | rigid, so undercut trees topple as a whole |
+| wood (trunks) | low-med | rigid; trunks carved out directly by the crater |
 | leaves (canopy) | tiny | brittle — stripped by the shockwave |
-| bedrock | infinite | indestructible floor & collapse anchor |
+| bedrock | infinite | indestructible floor |
 
 **Convention used throughout:** arrays are indexed `[x, y, z]`; `z` is up; `z = 0` is bedrock;
 material id `0` is air.
@@ -91,7 +93,7 @@ material id `0` is air.
 ## The Python sandbox — `voxelboom`
 
 A tiny **voxel explosion sandbox** in pure Python (numpy + scipy). Generate a 3D voxel world, **click
-to detonate**, and look at the crater, collapsed structures and scattered rubble. No animation — you
+to detonate**, and look at the crater and the scattered rubble it leaves. No animation — you
 set off a blast and inspect the terrain it leaves behind. The default world is a 160×160×80 landscape
 with forests of destructible trees.
 
@@ -129,9 +131,8 @@ python/
     noise.py       seeded value-noise / fBm / hash (numpy-only)
     world.py       World container + terrain generation
     blast.py       ray-cast shielding + stochastic crater + scorch
-    collapse.py    rigid-body structural collapse (scipy.ndimage)
+    collapse.py    despeckle cleanup of stray crater-surface voxels (scipy.ndimage)
     debris.py      ballistic debris + rim/ejecta deposition (retired — kept for reference, no longer in the pipeline)
-    settle.py      granular settling for loose materials
     simulate.py    the full post-explosion pipeline
     render/        pyvista (primary) + matplotlib (fallback) viewers
     app.py         world + viewer + click-to-detonate wiring
@@ -142,7 +143,7 @@ python/
 ### Tuning
 
 Every knob (grid size, tree density, crater scaling, ray energy, randomness amplitudes, shockwave
-reach/strength, gravity/repose, debris ballistics, render options) is in
+reach/strength, render options) is in
 [python/voxelboom/config.py](python/voxelboom/config.py), grouped and commented. Bigger craters? Raise
 `K_CRATER` or the `--yield`. Lumpier edges? Raise `CRATER_ANISOTROPY` / `RES_NOISE_AMP`. Wider/stronger
 shockwave? Raise `SHOCKWAVE_RADIUS` / `SHOCKWAVE_CRACK_RATE`. Denser forests? Raise `TREE_DENSITY` or
@@ -156,9 +157,8 @@ cd python
 pytest tests            # or: python tests/run_tests.py   (no pytest needed)
 ```
 
-Covers ray-cast shielding, the exposure-based shockwave, gravity collapse (floating chunks fall,
-anchored overhangs survive), determinism (same seed → identical world), trees, and the Fortran-order
-voxel→cell-index mapping the renderer relies on.
+Covers ray-cast shielding, the exposure-based shockwave, determinism (same seed → identical world),
+trees, and the Fortran-order voxel→cell-index mapping the renderer relies on.
 
 ---
 
@@ -176,8 +176,8 @@ the same realistic craters into the live world, in real time.
 | **shift + right-click** | open the config screen (yield + toggles) |
 
 Get the item from the *Tools & Utilities* creative tab (id `explosionlib:exploder`). The config screen
-sets **yield** (0.5–1024) and toggles for **shockwave / gravity collapse / debris / scorch / entity
-damage**. Those are sent with each blast; the server clamps the yield and re-raycasts.
+sets **yield** and toggles for **shockwave / scorch / entity damage**. Those are sent
+with each blast; the server floors the yield and re-raycasts.
 
 **Entities** get hurt and flung at detonation: vanilla-style falloff with line-of-sight
 (`Explosion.getSeenPercent`, so blocks shield them) and an upward-biased knockback (synced to clients
@@ -219,23 +219,48 @@ behaviour, not a custom registry:
 | `STRUCT` | everything else solid | — |
 
 Per-voxel blast resistance comes straight from `Block#getExplosionResistance()`, so vanilla material
-toughness drives the shielding and crater shape. Cracked rubble → `GRAVEL`, scorch → `BLACKSTONE`
-(edit `engine/Palette.java`). All tunables live in `engine/ExplosionConfig.java` (same numbers as the
-Python `config.py`).
+toughness drives the shielding and crater shape. The full physics tuning still lives in
+`engine/ExplosionConfig.java` (same numbers as the Python `config.py`); the knobs an operator actually
+wants are exposed in a config file (below).
 
-**Big yields, many blasts, no freeze.** Yield goes up to **1024** (crater radius capped at
-`MAX_RADIUS = 40`, captured region at `MAX_REGION_HALF = 80`). The work is split so the server thread
-only ever does a small, *bounded* amount per tick:
+### Configuration
+
+On first launch the mod writes a commented **`config/explosionlib.properties`** (in the instance's
+config folder — `FabricLoader#getConfigDir` / `FMLPaths.CONFIGDIR` on each loader). Edit it and restart;
+missing keys are re-filled, bad values fall back per-key, and a corrupt file falls back to defaults rather
+than crashing.
+
+There are **no size or performance caps to tune** — the engine sizes its own safety limits automatically
+(see below), so the file holds only what *shapes* a blast. Each scale is also a performance dial, because
+cost grows with the volume affected (~ radius³):
+
+| group | keys | notes |
+| --- | --- | --- |
+| **scales** | `craterScale`, `shockwaveRadius`, `shockwaveCrackRate`, `scorchChance`, `entityEffectRadius`, `entityKnockback`, `expansionSpeedRingsPerTick` | `craterScale` (radius ≈ `craterScale·cbrt(yield)`) is the biggest CPU/RAM driver; `shockwaveRadius` second; `shockwaveCrackRate=0` removes gravel; `expansionSpeedRingsPerTick` trades tick-smoothness for how fast the blast finishes |
+| **materials** | `rubbleBlock`, `scorchBlock` | any block id (incl. modded), resolved at server start; no perf impact |
+| **feature toggles** | `allowShockwave`, `allowScorch`, `allowEntityDamage` | set `false` to force a feature off server-wide, overriding the per-blast client toggle |
+
+**Safety is automatic, not configured.** The captured-region size scales with the **heap** (a bigger
+`-Xmx` allows bigger explosions, then clamps instead of OOM-ing) — *not* with core count, so a many-core
+box still gets big craters. Concurrent blasts are bounded by **total RAM used**, not a blast count, so
+many small blasts or a few huge ones both fit; the worker pool scales with cores; and a fixed per-tick
+work budget bounds main-thread cost so many blasts can't multiply the tick time. None of these are knobs —
+they just keep the server alive while the scales decide how big things get.
+
+**Big yields, many blasts, no freeze.** Yield is unbounded; the crater just keeps scaling with it until it
+reaches the captured-region cap, which the engine auto-sizes from the heap (`MAX_REGION_HALF`/`MAX_RADIUS`
+in `ExplosionConfig`) so a blast can't exceed what the machine holds. The work is split so the server
+thread only ever does a small, *bounded* amount per tick:
 
 - **Capture is off-thread.** On the server thread we only copy the `PalettedContainer` of each chunk
   section overlapping the region (a handful of small array copies per chunk — the same trick Minecraft
   uses to serialize chunks asynchronously). The millions-of-voxels decode (classify + blast-resistance
   lookup) then runs on a worker thread off that snapshot, alongside the rest of the pipeline (pure array
   math, no world access). The result is marshalled back to the server thread to apply.
-- **A concurrency cap** (`MAX_INFLIGHT`, derived from core count) limits how many heavy blasts compute
-  at once; a fixed worker pool (`cores/2`) does the math. Past the cap, a blast still booms and hurts
-  entities but sheds its terrain edits (logged) rather than risking an out-of-memory — so spamming huge
-  blasts can't pile up unbounded snapshots/regions.
+- **A RAM budget** (`REGION_BUDGET_BYTES`, ~¼ of the heap) bounds the memory all in-flight blasts use at
+  once — tracked as bytes, not a blast count, so many small blasts or a few huge ones both fit. A worker
+  pool (`cores/2`) does the math. When a blast would push past the budget it still booms and hurts entities
+  but sheds its terrain edits (logged) rather than risking an out-of-memory.
 - **Global per-tick budgets.** Edits are applied **ring-by-ring outward** over server ticks
   (`EXPANSION_SPEED` rings/tick *per blast*), but a shared `MAX_APPLY_BLOCKS_PER_TICK` budget caps the
   *total* block writes across **all** concurrent blasts in a level — so ten overlapping explosions share
@@ -249,8 +274,11 @@ finishes, so the blast also destroys blocks in chunks that weren't loaded.
 **Tidy aftermath.** When a blast finishes, a cleanup pass cascades out from the removed blocks and:
 (a) drops grass / vines / glow lichen / torches left floating (vanilla `canSurvive`), and (b) schedules
 a fluid tick on any neighbouring water/lava so it flows into the new cavity or drains — otherwise,
-since neighbour updates are suppressed during the blast, fluids would just hang frozen. Fluids are also
-excluded from the collapse pass so a disturbed water pocket isn't dropped as a chunk.
+since neighbour updates are suppressed during the blast, fluids would just hang frozen. The cascade is
+seeded from only the **surface** of the removed region (the cleared voxels next to something that
+survived — computed off-thread in `Engine.cleanupSeeds`), not its whole volume, so even a yield-thousands
+crater's floating grass/snow clears in a tick or two rather than the cleanup grinding through millions of
+interior air cells.
 
 ### Project layout
 

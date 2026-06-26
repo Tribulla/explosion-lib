@@ -41,9 +41,6 @@ SHOCKWAVE_TOUGHNESS_REF = 6.0  # blast_resistance at/below which stuff cracks fr
 SHOCKWAVE_CRACK_RATE = 0.2    # fraction of exposed structural surface cracked to rubble in place;
 SHOCKWAVE_SHATTER_RATE = 1.2
 
-COLLAPSE_ITERS = 4        # max collapse passes (Jenga cascades)
-REPOSE_SWEEPS = 200       # max angle-of-repose sweeps for loose material
-
 DEBRIS_FRACTION = 0.25
 DEBRIS_MAX_PARTICLES = 300
 UP_BIAS = 0.6             # upward loft added to debris launch velocity

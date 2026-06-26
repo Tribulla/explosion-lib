@@ -4,10 +4,6 @@ from scipy import ndimage
 from . import config
 from .materials import AIR, BEDROCK, IS_SOLID
 
-CONN6 = ndimage.generate_binary_structure(3, 1)    # face neighbors (6)
-CONN18 = ndimage.generate_binary_structure(3, 2)   # + edge neighbors (18)
-CONN26 = ndimage.generate_binary_structure(3, 3)   # + corner neighbors (26)
-
 _K6 = np.zeros((3, 3, 3), dtype=np.int8)
 _K6[1, 1, 0] = _K6[1, 1, 2] = _K6[1, 0, 1] = _K6[1, 2, 1] = _K6[0, 1, 1] = _K6[2, 1, 1] = 1
 
@@ -36,76 +32,4 @@ def despeckle(mat, region, iters=None):
         if not remove.any():
             break
         halo[remove] = AIR
-    return mat
-
-
-def frozen_mask(mat, connectivity=CONN6):
-    solid = IS_SOLID[mat]
-    labels, n = ndimage.label(solid, structure=connectivity)
-    if n == 0:
-        return np.zeros_like(solid)
-    faces = np.concatenate([
-        labels[0, :, :].ravel(), labels[-1, :, :].ravel(),
-        labels[:, 0, :].ravel(), labels[:, -1, :].ravel(),
-        labels[:, :, 0].ravel(), labels[:, :, -1].ravel(),
-    ])
-    anchored = np.unique(faces)
-    anchored = anchored[anchored != 0]
-    return solid & ~np.isin(labels, anchored)
-
-
-def structural_collapse(mat, connectivity=CONN6, max_iters=None, frozen=None):
-    if max_iters is None:
-        max_iters = config.COLLAPSE_ITERS
-    nz = mat.shape[2]
-
-    for _ in range(max_iters):
-        solid = IS_SOLID[mat]
-        labels, n = ndimage.label(solid, structure=connectivity)
-        if n == 0:
-            break
-        anchor_src = [
-            labels[0, :, :].ravel(), labels[-1, :, :].ravel(),
-            labels[:, 0, :].ravel(), labels[:, -1, :].ravel(),
-            labels[:, :, 0].ravel(), labels[:, :, -1].ravel(),
-        ]
-        if frozen is not None:
-            anchor_src.append(labels[frozen])
-        anchored = np.unique(np.concatenate(anchor_src))
-        anchored = anchored[anchored != 0]
-        supported = np.isin(labels, anchored)
-        floating = solid & ~supported & (mat != BEDROCK)
-        if not floating.any():
-            break
-
-        occ = supported | (mat == BEDROCK)   # what a falling chunk can land on
-        float_labels = np.unique(labels[floating])
-        float_labels = float_labels[float_labels != 0]
-
-        comps = []
-        for lbl in float_labels:
-            vox = np.argwhere(labels == lbl)
-            comps.append((int(vox[:, 2].min()), lbl, vox))
-        comps.sort(key=lambda c: c[0])   # lowest first
-
-        moved_any = False
-        for _minz, _lbl, vox in comps:
-            xs, ys, zs = vox[:, 0], vox[:, 1], vox[:, 2]
-            k = 0
-            while True:
-                nzs = zs - (k + 1)
-                if nzs.min() < 0:
-                    break
-                if occ[xs, ys, nzs].any():
-                    break
-                k += 1
-            vals = mat[xs, ys, zs]
-            if k > 0:
-                mat[xs, ys, zs] = AIR
-                mat[xs, ys, zs - k] = vals
-                moved_any = True
-            occ[xs, ys, zs - k] = True
-        if not moved_any:
-            break
-
     return mat

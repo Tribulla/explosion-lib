@@ -74,8 +74,14 @@ public final class WorldAdapter {
         return new Snapshot(nx, ny, nz, ox, oy, oz, sy0, chunks);
     }
 
+    private record Classed(int role, float resist) {}
+
     public static VoxelRegion decode(Snapshot s) {
         VoxelRegion r = new VoxelRegion(s.nx, s.ny, s.nz, s.ox, s.oy, s.oz);
+        java.util.Map<BlockState, Classed> memo = new java.util.IdentityHashMap<>();
+        BlockState lastSt = null;
+        int lastRole = 0;
+        float lastResist = 0f;
         for (int ex = 0; ex < s.nx; ex++) {
             int worldX = s.ox + ex;
             int cx = worldX >> 4, lx = worldX & 15;
@@ -95,11 +101,29 @@ public final class WorldAdapter {
                     int i = r.idx(ex, ey, ez);
                     r.orig[i] = st;
                     r.state[i] = st;
-                    int role = classify(st);
+                    int role;
+                    float resist;
+                    if (st == lastSt) {
+                        role = lastRole;
+                        resist = lastResist;
+                    } else {
+                        Classed c = memo.get(st);
+                        if (c == null) {
+                            int rl = classify(st);
+                            float res = rl == Material.AIR ? 0f
+                                : rl == Material.FLUID ? ExplosionConfig.FLUID_RESIST
+                                : (float) resistanceOf(st);
+                            c = new Classed(rl, res);
+                            memo.put(st, c);
+                        }
+                        role = c.role;
+                        resist = c.resist;
+                        lastSt = st;
+                        lastRole = role;
+                        lastResist = resist;
+                    }
                     r.id[i] = role;
-                    if (role == Material.AIR) r.resist[i] = 0f;
-                    else if (role == Material.FLUID) r.resist[i] = ExplosionConfig.FLUID_RESIST;
-                    else r.resist[i] = (float) resistanceOf(st);
+                    r.resist[i] = resist;
                 }
             }
         }
